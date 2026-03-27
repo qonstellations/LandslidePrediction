@@ -168,3 +168,149 @@ if epoch_acc > 50.0:
     print("✅ SUCCESS: Model learned the underlying patterns! (Accuracy > 50%)")
 else:
     print("❌ WARNING: Model failed to learn. Check gradients or data distributions.")
+
+# ==========================================
+# MIXTURE OF EXPERTS (MoE) UPGRADE
+# ==========================================
+
+# --- STEP 1: Feature Extractor ---
+print("\n--- MoE STEP 1: Feature Extractor ---")
+class FeatureExtractor(nn.Module):
+    def __init__(self):
+        super(FeatureExtractor, self).__init__()
+        self.conv1 = nn.Conv2d(8, 16, kernel_size=3, padding=1)
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2) 
+        
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        self.flatten = nn.Flatten()
+        
+        # Output 128-dimensional feature vector
+        self.fc_features = nn.Linear(32 * 16 * 16, 128)
+        self.relu_features = nn.ReLU()
+
+    def forward(self, x):
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        x = self.flatten(x)
+        x = self.relu_features(self.fc_features(x))
+        return x
+
+# --- MoE STEP 2, 3, 4: Experts, Router, and Combine ---
+print("\n--- MoE STEP 2, 3, 4: Experts and Router ---")
+class LandslideMoE(nn.Module):
+    def __init__(self):
+        super(LandslideMoE, self).__init__()
+        # Step 1: Feature Extractor
+        self.feature_extractor = FeatureExtractor() 
+        
+        # Step 2: Create 2 Diverse Experts
+        self.expert1 = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
+        )
+        
+        # Make expert2 deeper to learn higher-order variations
+        self.expert2 = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+        
+        # Step 3: Create Router
+        # Note: We compute raw logits here and apply softmax dynamically in forward()
+        self.router = nn.Linear(128, 2)
+        
+    def forward(self, x):
+        # Extract features (Batch, 128)
+        features = self.feature_extractor(x)
+        
+        # Expert predictions (Batch, 1) each
+        out1 = self.expert1(features) 
+        out2 = self.expert2(features) 
+        
+        # Router logic with noise for exploration
+        router_logits = self.router(features) 
+        if self.training:
+            router_logits = router_logits + 0.01 * torch.randn_like(router_logits)
+            
+        weights = torch.softmax(router_logits, dim=1) 
+        
+        w1 = weights[:, 0:1] # (Batch, 1)
+        w2 = weights[:, 1:2] # (Batch, 1)
+        
+        # Step 4: Combine
+        final_out = (w1 * out1) + (w2 * out2)
+        
+        # Return both the prediction AND the router weights for interpretability!
+        return final_out, weights
+
+moe_model = LandslideMoE()
+print("MoE Architecture ready.")
+
+# --- MoE STEP 5: Train MoE Model ---
+print("\n--- MoE STEP 5: Train MoE Model ---")
+
+# Same hyperparameters
+moe_optimizer = optim.Adam(moe_model.parameters(), lr=learning_rate)
+
+for epoch in range(epochs):
+    moe_model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    
+    # We'll track how often each expert is favoured
+    expert1_dominance = 0
+    expert2_dominance = 0
+    
+    for inputs, labels in dataloader:
+        moe_optimizer.zero_grad()
+        
+        # Forward pass (now returns predictions and weights)
+        outputs, weights = moe_model(inputs)
+        loss = criterion(outputs, labels)
+        
+        # Backward and optimize
+        loss.backward()
+        moe_optimizer.step()
+        
+        # Metrics
+        running_loss += loss.item() * inputs.size(0)
+        
+        probs = torch.sigmoid(outputs)
+        preds = (probs > 0.5).float()
+        
+        correct += (preds == labels).sum().item()
+        total += labels.size(0)
+        
+        # Track router behavior (Interpretability!)
+        # Check which expert had a higher weight on average in this batch
+        expert1_dominance += (weights[:, 0] > weights[:, 1]).sum().item()
+        expert2_dominance += (weights[:, 1] > weights[:, 0]).sum().item()
+        
+    moe_epoch_loss = running_loss / total
+    moe_epoch_acc = (correct / total) * 100
+    
+    if (epoch + 1) % 5 == 0 or epoch == 0:
+        e1_pct = (expert1_dominance / total) * 100
+        e2_pct = (expert2_dominance / total) * 100
+        print(f"MoE Epoch [{epoch+1:2d}/{epochs}] | Loss: {moe_epoch_loss:.4f} | Acc: {moe_epoch_acc:.2f}% | Expert 1 chosen: {e1_pct:.1f}%, Expert 2 chosen: {e2_pct:.1f}%")
+
+# --- MoE STEP 6: Compare Performance ---
+print("\n--- MoE STEP 6: Compare Performance ---")
+print(f"Base CNN Final Accuracy: {epoch_acc:.2f}%")
+print(f"MoE Model Final Accuracy: {moe_epoch_acc:.2f}%")
+
+if moe_epoch_acc > epoch_acc:
+    print("🔥 MoE Outperformed Base CNN!")
+elif moe_epoch_acc == epoch_acc:
+    print("⚖️ MoE Tied with Base CNN.")
+else:
+    print("📉 Base CNN Outperformed MoE (MoE might need more epochs or tuning).")
